@@ -1,30 +1,21 @@
 import requests, pandas as pd, numpy as np, time, os
-
-# === TELEGRAM CONFIGURATION (add your values) ===
-# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable signalling.
-# To restrict signals only to daily (D1) and weekly (W1) timeframe, the code below checks timeframe strings.
-TELEGRAM_BOT_TOKEN = ''  # e.g. '123456:ABC-DEF...'
-TELEGRAM_CHAT_ID = ''    # e.g. '@yourchannel' or chat id as int
-TELEGRAM_ENABLED = False
-
-# Allowed timeframes for sending signals
-TELEGRAM_ALLOWED_TFS = ['1d', '1w']  # Binance style timeframe strings: '1d' for D1, '1w' for W1
-
 from datetime import datetime
 from dotenv import load_dotenv
+import schedule
 
+# === LOAD ENV VARIABLES ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# backward compatibility: if TELEGRAM env not set, use BOT_TOKEN/CHAT_ID
-if not TELEGRAM_BOT_TOKEN:
-    TELEGRAM_BOT_TOKEN = BOT_TOKEN
-if not TELEGRAM_CHAT_ID:
-    CHAT_ID = os.getenv('CHAT_ID')
-    TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or CHAT_ID
 CHAT_ID = os.getenv("CHAT_ID")
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or BOT_TOKEN
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or CHAT_ID
+TELEGRAM_ENABLED = True  # bật/tắt telegram
+TELEGRAM_ALLOWED_TFS = ['1d', '1w']  # chỉ gửi trade signal D1/W1
+
+# === SYMBOLS & TIMEFRAMES ===
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
-TIMEFRAMES = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+TIMEFRAMES = {"15m": 15, "4h": 240, "1d": 1440, "1w": 10080}
 LIMIT = 250
 
 # ==== 1. Fetch Candle Data ====
@@ -45,33 +36,15 @@ def atr(df, period=14):
     return tr.rolling(period).mean()
 
 # ==== 3. Swing High / Low ====
-def find_swings1(df, lookback=3):
-    swings = []
-    for i in range(lookback, len(df)-lookback):
-        high, low = df['h'][i], df['l'][i]
-        if high == max(df['h'][i-lookback:i+lookback+1]):
-            swings.append(('High', i, high))
-        elif low == min(df['l'][i-lookback:i+lookback+1]):
-            swings.append(('Low', i, low))
-    return swings[-6:]
 def find_swings(df, lookback=2):
-    """
-    Xác định swing high / swing low dựa trên 5 nến (2 trái, 1 trung tâm, 2 phải)
-    """
     swings = []
     for i in range(lookback, len(df)-lookback):
         high = df['h'][i]
         low = df['l'][i]
-
-        # Swing High: cao nhất trong 5 nến
         if high == max(df['h'][i-lookback:i+lookback+1]):
             swings.append(('High', i, high))
-
-        # Swing Low: thấp nhất trong 5 nến
         elif low == min(df['l'][i-lookback:i+lookback+1]):
             swings.append(('Low', i, low))
-
-    # Lấy 3 đỉnh và 3 đáy mới nhất
     highs = [s for s in swings if s[0] == 'High'][-3:]
     lows = [s for s in swings if s[0] == 'Low'][-3:]
     return highs + lows
@@ -137,7 +110,6 @@ def trade_plan(signal_type, ob):
 def predict_next_swing(df, atr_val):
     swings = find_swings(df)
     if len(swings)<3: return None
-    # khoảng cách nến giữa các swing
     distances = [swings[i][1]-swings[i-1][1] for i in range(1,len(swings))]
     mean_dist = np.mean(distances)
     last_swing = swings[-1][1]
@@ -161,6 +133,7 @@ def pa_signal(df):
     if not ob_list: return signal, reason, structure, sweep, plan, next_swing
 
     latest_ob = ob_list[-1]
+
     if structure=="Uptrend" and confirm=="Bullish confirm":
         if sweep=="Buy-side liquidity sweep" or latest_ob["type"]=="Bullish":
             signal="BUY"; reason.append("Uptrend + Demand + Sweep")
@@ -176,12 +149,27 @@ def pa_signal(df):
     return signal, reason, structure, sweep, plan, next_swing
 
 # ==== 11. Telegram Send ====
-def send_telegram(symbol, tf, signal, reason, structure, sweep, plan, next_swing):
-    msg=f"""
+def send_telegram_message(message: str, timeframe: str = ''):
+    if not TELEGRAM_ENABLED: return False
+    tf = timeframe.lower()
+    if TELEGRAM_BOT_TOKEN is None or TELEGRAM_CHAT_ID is None:
+        print("Telegram token/chat not configured")
+    return False
+    try:
+        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+        resp = requests.post(url, data=payload, timeout=10)
+        return resp.ok
+    except Exception as e:
+        print("send_telegram_message error:", e)
+        return False
+
+def generate_report_message(symbol, tf, sig, reason, structure, sweep, plan, next_swing):
+    msg = f"""
 📊 {symbol} ({tf})
 Trend: {structure}
 Liquidity: {sweep}
-Signal: {signal} 🚦
+Signal: {sig} 🚦
 Reason: {', '.join(reason)}
 
 🎯 ENTRY PLAN
@@ -193,97 +181,40 @@ RR: {plan['rr'] if plan else '-'}
 📈 NEXT SWING ESTIMATE
 Next swing in ~{next_swing} candles
 
-Time: {datetime.now().strftime('%H:%M:%S')}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                 params={"chat_id":CHAT_ID,"text":msg})
+    return msg
 
-# ==== 12. MAIN LOOP ====
-def analyze_all():
+def process_symbol_tf(sym, tf):
+    try:
+        df = fetch_klines(sym, tf)
+        sig, reason, structure, sweep, plan, next_swing = pa_signal(df)
+
+        # Gửi báo cáo 4h
+        if tf=="4h":
+            msg = generate_report_message(sym, tf, sig, reason, structure, sweep, plan, next_swing)
+            send_telegram_message(msg, timeframe=tf)
+            print(f"🕒 4h report sent for {sym}-{tf}")
+
+        # Gửi trade signal D1/W1
+        if tf in TELEGRAM_ALLOWED_TFS and sig!="WAIT":
+            msg = generate_report_message(sym, tf, sig, reason, structure, sweep, plan, next_swing)
+            send_telegram_message(msg, timeframe=tf)
+            print(f"🚦 Signal sent for {sym}-{tf}: {sig}")
+
+    except Exception as e:
+        print(f"Error processing {sym}-{tf}: {e}")
+
+def analyze_all_symbols():
     for sym in SYMBOLS:
         for tf in TIMEFRAMES.keys():
-            try:
-                df = fetch_klines(sym, tf)
-                sig, reason, structure, sweep, plan, next_swing = pa_signal(df)
-                if sig!="WAIT":
-                    send_telegram(sym, tf, sig, reason, structure, sweep, plan, next_swing)
-                time.sleep(0.2)
-            except Exception as e:
-                print(f"Error {sym}-{tf}: {e}")
+            process_symbol_tf(sym, tf)
+
+# ==== MAIN SCHEDULE LOOP ====
+schedule.every().hour.at(":00").do(analyze_all_symbols)
 
 if __name__=="__main__":
+    print(f"Bot started at {datetime.now()}")
     while True:
-        print(f"⏱️ Checking signals at {datetime.now()}...")
-        analyze_all()
-        time.sleep(60)
-
-
-import requests
-
-def send_telegram_message(message: str, timeframe: str = ''):
-    """Send a telegram message if enabled and timeframe is allowed (D1/W1).
-    timeframe should be a Binance timeframe string like '1d' or '1w'.
-    """
-    try:
-        if not TELEGRAM_ENABLED:
-            return False
-        tf = timeframe.lower()
-        if tf not in TELEGRAM_ALLOWED_TFS:
-            # not allowed timeframe for signalling
-            return False
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            print('Telegram not configured (missing token/chat id).')
-            return False
-        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
-        resp = requests.post(url, data=payload, timeout=10)
-        return resp.ok
-    except Exception as e:
-        print('send_telegram_message error:', e)
-        return False
-
-
-
-def compute_tp_sl(entry_price, sl_price):
-    """Compute TP constraints:
-    - TP percent must be > 5%
-    - TP distance must be > 3 * SL distance
-    Returns a tuple (tp_price, ok_flag, reason)
-    If constraints cannot be met, returns (None, False, reason)
-    Assumes long positions where tp_price > entry_price; for short, caller should swap logic.
-    """
-    try:
-        entry = float(entry_price)
-        sl = float(sl_price)
-        sl_dist = abs(entry - sl)
-        min_tp_dist = max(0.05 * entry, 3 * sl_dist)
-        tp_price = None
-        # default propose tp as entry + min_tp_dist (long) — caller should adjust if short
-        tp_price = entry + min_tp_dist
-        tp_percent = (abs(tp_price - entry) / entry) * 100
-        if tp_percent <= 5:
-            return (None, False, f'TP percent {tp_percent:.2f}% <= 5%')
-        if min_tp_dist <= 3 * sl_dist:
-            # already enforced by min_tp_dist definition but keep check
-            return (None, False, 'TP distance not > 3 * SL distance')
-        return (tp_price, True, 'OK')
-    except Exception as e:
-        return (None, False, f'compute_tp_sl error: {e}')
-
-
-# NOTE:
-# - To apply TP constraints in your strategy, call compute_tp_sl(entry_price, sl_price)
-#   and use the returned tp_price when ok_flag is True.
-# Example:
-#    tp_price, ok, reason = compute_tp_sl(entry, sl)
-#    if ok:
-#        # use tp_price
-#    else:
-#        print('TP constraint failed:', reason)
-
-
-
-import time
-def now_ms(offset_ms: int = 0):
-    """Return current timestamp in milliseconds with optional offset."""
-    return int(time.time() * 1000) + int(offset_ms)
+        schedule.run_pending()
+        time.sleep(5)
