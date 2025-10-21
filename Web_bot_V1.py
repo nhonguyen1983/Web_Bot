@@ -1,3 +1,4 @@
+
 import requests, pandas as pd, numpy as np, time, os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -45,6 +46,8 @@ def fetch_klines(symbol, tf):
 
 # ==== 3. INDICATORS ====
 def atr(df, period=14):
+    if len(df) < (period + 1):
+        return []
     high_low = df['h']-df['l']
     high_close = abs(df['h']-df['c'].shift())
     low_close = abs(df['l']-df['c'].shift())
@@ -52,9 +55,13 @@ def atr(df, period=14):
     return tr.rolling(period).mean()
 
 def ema(df, period):
+    if len(df) < (period + 1):
+        return []
     return df['c'].ewm(span=period, adjust=False).mean()
 
 def rsi(df, period=14):
+    if len(df) < (period + 1):
+        return []
     delta = df['c'].diff()
     up = delta.clip(lower=0)
     down = -1*delta.clip(upper=0)
@@ -64,6 +71,8 @@ def rsi(df, period=14):
     return 100 - 100/(1+rs)
 
 def bollinger_bands(df, period=20, std_dev=4):
+    if len(df) < (period + 1):
+        return []
     mid = df['c'].rolling(period).mean()
     std = df['c'].rolling(period).std()
     upper = mid + std_dev*std
@@ -123,6 +132,8 @@ def confirm_candle(df):
     return None
 
 def find_order_blocks(df, atr_val):
+    if len(df) < 20:
+        return []
     ob_list=[]
     for i in range(2,len(df)-2):
         if df['c'][i]<df['o'][i] and df['c'][i+1]>df['h'][i]:
@@ -207,10 +218,18 @@ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     return msg
 
 # ==== 7. PROCESS SYMBOL/TF ====
-def process_symbol_tf(symbol, tf):
-    df = fetch_klines(symbol, tf)
-    signal, reason, structure, sweep, plan = pa_signal(df)
+def process_symbol_tf(sym, tf):
+    try:
+        df = fetch_klines(sym, tf)
+        if df.empty:
+            print(f"⚠️ No data for {sym}-{tf}, skipping...")
+            return  # bỏ qua nếu không có dữ liệu
+        price = df['c'].iloc[-1]  # an toàn vì df đã kiểm tra
+        sig, reason, structure, sweep, plan, next_swing = pa_signal(df)
 
+        # ... tiếp tục logic
+    except Exception as e:
+        print(f"Error processing {sym}-{tf}: {e}")
     # Nếu PA signal hoặc giá chạm Bollinger, gửi ngay
     bb_upper, bb_mid, bb_lower = bollinger_bands(df)
     price = df['c'].iloc[-1]
@@ -266,4 +285,3 @@ if __name__=="__main__":
     while True:
         schedule.run_pending()
         time.sleep(5)
-
