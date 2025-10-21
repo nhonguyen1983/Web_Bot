@@ -72,6 +72,8 @@ def bollinger_bands(df, period=20, std_dev=4):
 
 # ==== 4. SWING HIGH/LOW ====
 def find_swings(df, lookback=2):
+    if len(df) < (lookback*2 + 1):
+        return []
     swings=[]
     for i in range(lookback, len(df)-lookback):
         high, low = df['h'][i], df['l'][i]
@@ -98,19 +100,25 @@ def market_structure(df):
     return structure
 
 def liquidity_sweep(df):
+    if len(df) < 3:
+        return None  # chưa đủ dữ liệu
     for i in range(len(df)-3, len(df)-1):
-        body=abs(df['c'][i]-df['o'][i])
-        wick_high=df['h'][i]-max(df['c'][i], df['o'][i])
-        wick_low=min(df['c'][i], df['o'][i])-df['l'][i]
-        if wick_high>=2*body: return "Sell-side liquidity sweep"
-        if wick_low>=2*body: return "Buy-side liquidity sweep"
+        body = abs(df['c'][i]-df['o'][i])
+        wick_high = df['h'][i]-max(df['c'][i], df['o'][i])
+        wick_low = min(df['c'][i], df['o'][i])-df['l'][i]
+        if wick_high >= 2*body:
+            return "Sell-side liquidity sweep"
+        if wick_low >= 2*body:
+            return "Buy-side liquidity sweep"
     return None
 
 def confirm_candle(df):
+    if len(df) < 2:
+        return None
     last, prev = df.iloc[-1], df.iloc[-2]
-    if last['c']>last['o'] and last['c']>(prev['o']+prev['c'])/2:
+    if last['c'] > last['o'] and last['c'] > (prev['o']+prev['c'])/2:
         return "Bullish confirm"
-    elif last['c']<last['o'] and last['c']<(prev['o']+prev['c'])/2:
+    elif last['c'] < last['o'] and last['c'] < (prev['o']+prev['c'])/2:
         return "Bearish confirm"
     return None
 
