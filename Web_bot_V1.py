@@ -17,7 +17,9 @@ TELEGRAM_ALLOWED_TFS = ['1d', '1w']  # chỉ gửi trade signal D1/W1
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 TIMEFRAMES = {"15m": 15, "4h": 240, "1d": 1440, "1w": 10080}
 LIMIT = 250
-
+def send_start_message():
+    msg = f"🤖 Bot started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nHi! Bot đang chạy và sẽ gửi báo cáo/trade signal theo lịch."
+    send_telegram_message(msg, timeframe='start')
 # ==== 1. Fetch Candle Data ====
 def fetch_klines(symbol, tf):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={tf}&limit={LIMIT}"
@@ -215,6 +217,7 @@ schedule.every().hour.at(":00").do(analyze_all_symbols)
 
 if __name__=="__main__":
     print(f"Bot started at {datetime.now()}")
+    send_start_message()  # gửi lời chào Telegram ngay khi start
     while True:
         schedule.run_pending()
         time.sleep(5)
