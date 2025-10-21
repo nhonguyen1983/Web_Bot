@@ -1,13 +1,30 @@
 import requests, pandas as pd, numpy as np, time, os
+
+# === TELEGRAM CONFIGURATION (add your values) ===
+# Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable signalling.
+# To restrict signals only to daily (D1) and weekly (W1) timeframe, the code below checks timeframe strings.
+TELEGRAM_BOT_TOKEN = ''  # e.g. '123456:ABC-DEF...'
+TELEGRAM_CHAT_ID = ''    # e.g. '@yourchannel' or chat id as int
+TELEGRAM_ENABLED = False
+
+# Allowed timeframes for sending signals
+TELEGRAM_ALLOWED_TFS = ['1d', '1w']  # Binance style timeframe strings: '1d' for D1, '1w' for W1
+
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+# backward compatibility: if TELEGRAM env not set, use BOT_TOKEN/CHAT_ID
+if not TELEGRAM_BOT_TOKEN:
+    TELEGRAM_BOT_TOKEN = BOT_TOKEN
+if not TELEGRAM_CHAT_ID:
+    CHAT_ID = os.getenv('CHAT_ID')
+    TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or CHAT_ID
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
-TIMEFRAMES = {"15m": 15, "4h": 240, "1d": 1440}
+TIMEFRAMES = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
 LIMIT = 250
 
 # ==== 1. Fetch Candle Data ====
@@ -199,3 +216,74 @@ if __name__=="__main__":
         print(f"⏱️ Checking signals at {datetime.now()}...")
         analyze_all()
         time.sleep(60)
+
+
+import requests
+
+def send_telegram_message(message: str, timeframe: str = ''):
+    """Send a telegram message if enabled and timeframe is allowed (D1/W1).
+    timeframe should be a Binance timeframe string like '1d' or '1w'.
+    """
+    try:
+        if not TELEGRAM_ENABLED:
+            return False
+        tf = timeframe.lower()
+        if tf not in TELEGRAM_ALLOWED_TFS:
+            # not allowed timeframe for signalling
+            return False
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print('Telegram not configured (missing token/chat id).')
+            return False
+        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+        resp = requests.post(url, data=payload, timeout=10)
+        return resp.ok
+    except Exception as e:
+        print('send_telegram_message error:', e)
+        return False
+
+
+
+def compute_tp_sl(entry_price, sl_price):
+    """Compute TP constraints:
+    - TP percent must be > 5%
+    - TP distance must be > 3 * SL distance
+    Returns a tuple (tp_price, ok_flag, reason)
+    If constraints cannot be met, returns (None, False, reason)
+    Assumes long positions where tp_price > entry_price; for short, caller should swap logic.
+    """
+    try:
+        entry = float(entry_price)
+        sl = float(sl_price)
+        sl_dist = abs(entry - sl)
+        min_tp_dist = max(0.05 * entry, 3 * sl_dist)
+        tp_price = None
+        # default propose tp as entry + min_tp_dist (long) — caller should adjust if short
+        tp_price = entry + min_tp_dist
+        tp_percent = (abs(tp_price - entry) / entry) * 100
+        if tp_percent <= 5:
+            return (None, False, f'TP percent {tp_percent:.2f}% <= 5%')
+        if min_tp_dist <= 3 * sl_dist:
+            # already enforced by min_tp_dist definition but keep check
+            return (None, False, 'TP distance not > 3 * SL distance')
+        return (tp_price, True, 'OK')
+    except Exception as e:
+        return (None, False, f'compute_tp_sl error: {e}')
+
+
+# NOTE:
+# - To apply TP constraints in your strategy, call compute_tp_sl(entry_price, sl_price)
+#   and use the returned tp_price when ok_flag is True.
+# Example:
+#    tp_price, ok, reason = compute_tp_sl(entry, sl)
+#    if ok:
+#        # use tp_price
+#    else:
+#        print('TP constraint failed:', reason)
+
+
+
+import time
+def now_ms(offset_ms: int = 0):
+    """Return current timestamp in milliseconds with optional offset."""
+    return int(time.time() * 1000) + int(offset_ms)
